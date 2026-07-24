@@ -407,14 +407,16 @@ def render_auth():
                         if save_otp(r_email, otp_code):
                             if has_smtp:
                                 sent = send_otp_email(r_email, otp_code)
-                                if sent:
-                                    st.success(f"✅ ส่ง OTP ไปที่ **{r_email}** แล้ว! กรุณาตรวจสอบกล่องจดหมาย")
-                                else:
+                                if not sent:
                                     st.error("❌ ส่งอีเมลไม่สำเร็จ — กรุณาตรวจสอบการตั้งค่า SMTP")
                                     st.stop()
-                            else:
-                                st.info(f"🔑 **[ทดสอบ] รหัส OTP ของคุณคือ: `{otp_code}`** (หมดอายุใน 10 นาที)")
-                            st.session_state.reg_pending = {"username": r_user, "email": r_email, "password": r_pw}
+                            
+                            st.session_state.reg_pending = {
+                                "username": r_user, 
+                                "email": r_email, 
+                                "password": r_pw,
+                                "test_otp": otp_code if not has_smtp else None
+                            }
                             st.session_state.reg_step = 2
                             st.rerun()
 
@@ -423,6 +425,10 @@ def render_auth():
                 pending = st.session_state.reg_pending
                 st.caption("ขั้นตอนที่ 2/2 — ยืนยัน OTP")
                 st.info(f"✉️ ส่งรหัส OTP 6 หลักไปที่: **{pending.get('email', '')}**")
+                
+                if not has_smtp and pending.get("test_otp"):
+                    st.success(f"🔑 **[โหมดทดสอบ] รหัส OTP ของคุณคือ:** `{pending['test_otp']}`")
+                
                 otp_input = st.text_input("กรอกรหัส OTP", max_chars=6, placeholder="123456")
 
                 c1, c2 = st.columns(2)
