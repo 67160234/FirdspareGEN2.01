@@ -333,7 +333,7 @@ def create_community_comment(post_id, user_id, content):
 def _ensure_shop_tables():
     conn = get_db_connection()
     conn.execute("""CREATE TABLE IF NOT EXISTS shops (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL UNIQUE,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER,
         shop_name TEXT NOT NULL, address TEXT NOT NULL, latitude REAL NOT NULL,
         longitude REAL NOT NULL, open_hours TEXT, google_map_link TEXT, created_at TEXT NOT NULL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS shop_parts (
@@ -343,6 +343,23 @@ def _ensure_shop_tables():
     conn.execute("""CREATE TABLE IF NOT EXISTS part_embeddings (
         id INTEGER PRIMARY KEY AUTOINCREMENT, part_id INTEGER NOT NULL UNIQUE,
         embedding TEXT NOT NULL)""")
+    
+    # ── Auto-migrate missing columns for older DB versions ──
+    try: conn.execute("ALTER TABLE shops ADD COLUMN owner_id INTEGER")
+    except: pass
+    try: conn.execute("ALTER TABLE shops ADD COLUMN open_hours TEXT")
+    except: pass
+    try: conn.execute("ALTER TABLE shop_parts ADD COLUMN car_model TEXT")
+    except: pass
+    try: conn.execute("ALTER TABLE shop_parts ADD COLUMN brand TEXT")
+    except: pass
+    try: conn.execute("ALTER TABLE shop_parts ADD COLUMN condition TEXT DEFAULT 'ใหม่'")
+    except: pass
+    try: conn.execute("ALTER TABLE shop_parts ADD COLUMN stock INTEGER DEFAULT 1")
+    except: pass
+    try: conn.execute("ALTER TABLE shop_parts ADD COLUMN created_at TEXT")
+    except: pass
+    
     conn.commit(); conn.close()
 
 def get_user_shop(user_id):
