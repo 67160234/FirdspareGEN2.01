@@ -1,823 +1,667 @@
 import streamlit as st
-import pymysql
-import torch
-import clip
+import sqlite3
+import pandas as pd
 import numpy as np
-import json
-import hashlib
+import clip
+import torch
 from PIL import Image
 import faiss
 import math
 import os
+import hashlib
+import json
 import smtplib
 import random
-import re
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from supabase import create_client, Client
 
-st.set_page_config(page_title="FindSpares AI", page_icon="🔧", layout="wide")
+st.set_page_config(page_title="FindSpares AI (Cloud)", layout="wide", initial_sidebar_state="collapsed")
 
-# ==================================================
-# GLOBAL CSS
-# ==================================================
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap');
+# ---------------------------
+# SESSION STATE INIT (MUST BE AT TOP)
+# ---------------------------
+if "has_started" not in st.session_state:
+    st.session_state.has_started = False
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "username" not in st.session_state:
+    st.session_state.username = None
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+if "page" not in st.session_state:
+    st.session_state.page = 1
+if "show_camera" not in st.session_state:
+    st.session_state.show_camera = False
+if "reg_step" not in st.session_state:
+    st.session_state.reg_step = 1  # 1 = form, 2 = otp verify
+if "reg_pending" not in st.session_state:
+    st.session_state.reg_pending = {}
 
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-
-/* Hide Streamlit branding */
-#MainMenu, footer, header { visibility: hidden; }
-.block-container { padding-top: 0 !important; }
-
-/* ===== LANDING PAGE ===== */
-.landing-wrap {
-    min-height: 100vh;
-    background: linear-gradient(135deg, #0a0a1a 0%, #0d1b3e 40%, #0a2a4a 70%, #051020 100%);
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    text-align: center; padding: 2rem;
-    position: relative; overflow: hidden;
-}
-.landing-wrap::before {
-    content: '';
-    position: absolute; inset: 0;
-    background: radial-gradient(ellipse at 30% 20%, rgba(255,165,0,0.08) 0%, transparent 60%),
-                radial-gradient(ellipse at 70% 80%, rgba(0,120,255,0.08) 0%, transparent 60%);
-    pointer-events: none;
-}
-.landing-badge {
-    display: inline-block;
-    background: rgba(255,165,0,0.12);
-    border: 1px solid rgba(255,165,0,0.3);
-    color: #ffa500; font-size: 0.8rem; font-weight: 600;
-    padding: 0.35rem 1rem; border-radius: 999px;
-    letter-spacing: 0.1em; text-transform: uppercase;
-    margin-bottom: 1.5rem;
-}
-.landing-logo {
-    font-size: clamp(3rem, 8vw, 6rem);
-    font-weight: 900; line-height: 1;
-    background: linear-gradient(135deg, #ffffff 0%, #ffd580 50%, #ffa500 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 0.5rem;
-    filter: drop-shadow(0 0 40px rgba(255,165,0,0.3));
-}
-.landing-sub {
-    font-size: clamp(1rem, 2.5vw, 1.4rem);
-    color: rgba(255,255,255,0.55); font-weight: 300;
-    margin-bottom: 2.5rem; letter-spacing: 0.02em;
-}
-.landing-features {
-    display: flex; gap: 1.5rem; justify-content: center;
-    flex-wrap: wrap; margin-bottom: 3rem;
-}
-.feat-pill {
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.12);
-    color: rgba(255,255,255,0.75);
-    padding: 0.5rem 1.2rem; border-radius: 999px;
-    font-size: 0.85rem; backdrop-filter: blur(10px);
-}
-.gear-bg {
-    font-size: 8rem; opacity: 0.04;
-    position: absolute; top: 8%; right: 5%;
-    animation: spin 20s linear infinite;
-}
-.gear-bg2 {
-    font-size: 5rem; opacity: 0.04;
-    position: absolute; bottom: 10%; left: 5%;
-    animation: spin 30s linear infinite reverse;
-}
-@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
-
-/* ===== AUTH PAGE ===== */
-.auth-wrap {
-    min-height: 100vh;
-    background: linear-gradient(135deg, #0a0a1a 0%, #0d1b3e 50%, #051020 100%);
-    display: flex; align-items: center; justify-content: center;
-    padding: 2rem;
-}
-.auth-card {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 20px; padding: 2.5rem;
-    width: 100%; max-width: 420px;
-    backdrop-filter: blur(20px);
-    box-shadow: 0 25px 60px rgba(0,0,0,0.5);
-}
-.auth-title {
-    font-size: 1.8rem; font-weight: 700;
-    background: linear-gradient(135deg, #fff 0%, #ffa500 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 0.25rem;
-}
-.auth-sub { color: rgba(255,255,255,0.45); font-size: 0.9rem; margin-bottom: 2rem; }
-
-/* ===== BUTTON STYLES ===== */
-div[data-testid="stButton"] > button {
-    border-radius: 12px !important;
-    font-weight: 600 !important;
-    transition: all 0.2s ease !important;
-    border: none !important;
-}
-div[data-testid="stButton"] > button:hover {
-    transform: translateY(-2px) !important;
-    box-shadow: 0 8px 25px rgba(255,165,0,0.35) !important;
+# ---------------------------
+# SEARCH SYNONYMS (SMART SEARCH)
+# ---------------------------
+SYNONYM_MAP = {
+    "Brake Pad": ["เบรก", "เบรค", "ผ้าเบรก", "ผ้าเบรค", "ก้ามเบรก", "เบรกหน้า", "เบรกหลัง", "Brake Pad", "Brake Pads", "Brakepads"],
+    "Car Battery": ["แบตเตอรี่", "แบต", "แบตรถยนต์", "ไฟฟ้ารถ", "ขั้วแบต", "น้ำกลั่น", "Car Battery", "Battery", "Accu", "Car Batt"],
+    "Air Filter": ["กรองอากาศ", "กรองเครื่อง", "กรอง", "ไส้กรอง", "กรองฝุ่น", "กรองแอร์", "Air Filter", "Air Filters", "Filter", "Air Filter Element"],
+    "Ball Joint": ["ลูกหมาก", "ลูกหมากปีกนก", "ลูกหมากแร็ค", "ช่วงล่าง", "ลูกหมากล่าง", "ลูกหมากบน", "คันชัก", "Ball Joint", "Ball Joints", "Suspension Joint"],
+    "Brake Disc": ["จานเบรก", "จานเบรค", "จาน", "จานดิส", "เบรกจาน", "จานดิสก์", "Brake Disc", "Brake Discs", "Disc Brake", "Rotor"],
+    "Radiator": ["หม้อน้ำ", "ระบายความร้อน", "พัดลมหม้อน้ำ", "ฝาหม้อน้ำ", "ท่อน้ำ", "รังผึ้งหม้อน้ำ", "น้ำยาหล่อเย็น", "Radiator", "Radiators", "Cooling System"],
+    "Shock Absorber": ["โช้ค", "โช๊ค", "โช้คอัพ", "สปริง", "ช่วงล่าง", "Shock Absorber", "Shock Absorbers", "Shock", "Shocks", "Strut", "Struts"],
+    "Spark Plug": ["หัวเทียน", "คอยล์จุดระเบิด", "จุดระเบิด", "ไฟแปลบ", "หัวเทียนเข็ม", "หัวเทียนรถ", "Spark Plug", "Spark Plugs", "Plug", "Ignition Plug"],
+    "Starter Motor": ["ไดสตาร์ท", "มอเตอร์สตาร์ท", "สตาร์ทรถ", "ไดสตาร์ทรถ", "มอเตอร์สตาร์ทรถ", "Starter Motor", "Starter", "Starters", "Ignition Starter"],
+    "AC Compressor": ["คอมแอร์", "คอมเพรสเซอร์", "แอร์รถยนต์", "ทำความเย็น", "น้ำยาแอร์", "ท่อแอร์", "AC Compressor", "Compressor", "Air Con", "AC Unit"]
 }
 
-/* Result card */
-.part-card {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 16px; padding: 1rem;
-    margin-bottom: 1rem;
-    transition: border-color 0.2s;
-}
-.part-card:hover { border-color: rgba(255,165,0,0.3); }
-.tag-pill {
-    display: inline-block;
-    background: rgba(255,165,0,0.12);
-    color: #ffa500; border-radius: 999px;
-    padding: 2px 10px; font-size: 0.75rem;
-    margin: 2px;
-}
-</style>
-""", unsafe_allow_html=True)
+# ---------------------------
+# DATABASE CONFIG (SUPABASE FALLBACK TO SQLITE)
+# ---------------------------
+SUPABASE_URL = st.secrets.get("SUPABASE_URL")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
+USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
 
-# ==================================================
-# SESSION STATE INIT
-# ==================================================
-defaults = {
-    "nav": "landing",   # landing | auth | main
-    "auth_tab": "login",
-    "user": None,
-    "results": None,
-    "search_page": 1,
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+if USE_SUPABASE:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    st.sidebar.warning("💾 Using local SQLite (Session only). Use Supabase for permanent storage.")
 
-# ==================================================
-# DB CONNECTION
-# ==================================================
+SALT = "FindSparesAI_2024"
+
 def get_db_connection():
+    conn = sqlite3.connect("database.db")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def hash_pw(password):
+    return hashlib.sha256((password + SALT).encode()).hexdigest()
+
+def verify_user(username, password):
     try:
-        if "DB_HOST" not in st.secrets:
-            st.error("❌ ไม่พบ DB secrets")
-            st.stop()
-        return pymysql.connect(
-            host=st.secrets["DB_HOST"],
-            user=st.secrets["DB_USER"],
-            password=st.secrets["DB_PASSWORD"],
-            database=st.secrets["DB_NAME"],
-            port=int(st.secrets.get("DB_PORT", 3306)),
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=10
-        )
-    except Exception as e:
-        st.error(f"❌ DB Error: {e}")
-        st.stop()
-
-# ==================================================
-# CLIP MODEL (cached)
-# ==================================================
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-@st.cache_resource
-def load_clip_model():
-    m, p = clip.load("ViT-B/32", device=device)
-    return m, p
-
-model, preprocess = load_clip_model()
-
-# ==================================================
-# VECTORS (cached)
-# ==================================================
-@st.cache_resource
-def load_vectors_cached():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT sp.id, sp.part_name, sp.image,
-               sp.description, sp.function_tags,
-               s.shop_name, s.latitude, s.longitude, s.google_map_link,
-               pe.embedding
-        FROM part_embeddings pe
-        JOIN shop_parts sp ON pe.part_id = sp.id
-        JOIN shops s ON sp.shop_id = s.id
-    """)
-    data = cursor.fetchall()
-    conn.close()
-    if not data:
-        return None, []
-    vectors, items = [], []
-    for d in data:
-        vec = np.array(json.loads(d["embedding"])).astype("float32")
-        vec /= np.linalg.norm(vec)
-        vectors.append(vec)
-        items.append(d)
-    vectors = np.array(vectors)
-    idx = faiss.IndexFlatIP(vectors.shape[1])
-    idx.add(vectors)
-    return idx, items
-
-# ==================================================
-# HELPERS
-# ==================================================
-def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
-
-def distance(lat1, lon1, lat2, lon2):
-    R = 6371
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-def translate_keyword(keyword):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT part_name FROM part_synonyms
-            WHERE synonym LIKE %s ORDER BY LENGTH(synonym) DESC LIMIT 5
-        """, ("%" + keyword + "%",))
-        rows = cursor.fetchall()
-        if rows:
-            parts = list(dict.fromkeys([r["part_name"] for r in rows]))
+        pw_hash = hash_pw(password)
+        if USE_SUPABASE:
+            res = supabase.table("users").select("id").eq("username", username).eq("password", pw_hash).execute()
+            if res.data: return res.data[0]["id"]
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, email TEXT, password TEXT)")
+            cursor.execute("SELECT id FROM users WHERE username = ? AND password = ?", (username, pw_hash))
+            row = cursor.fetchone()
             conn.close()
-            return " ".join(parts)
-        words = keyword.split()
-        found = []
-        for w in words:
-            if len(w) < 2: continue
-            cursor.execute("""
-                SELECT part_name FROM part_synonyms
-                WHERE synonym LIKE %s ORDER BY LENGTH(synonym) DESC LIMIT 1
-            """, ("%" + w + "%",))
-            r = cursor.fetchone()
-            if r and r["part_name"] not in found:
-                found.append(r["part_name"])
-        conn.close()
-        return " ".join(found) + " " + keyword if found else keyword
-    except:
-        return keyword
+            if row: return row["id"]
+    except Exception as e:
+        st.error(f"❌ ระบบยืนยันตัวตนผิดพลาด: {e}")
+    return None
 
-def encode_text(text):
-    tokens = clip.tokenize([text], truncate=True).to(device)
-    with torch.no_grad():
-        vec = model.encode_text(tokens)
-    vec /= vec.norm(dim=-1, keepdim=True)
-    return vec.cpu().numpy().astype("float32")
-
-def encode_image(img):
-    img_p = preprocess(img).unsqueeze(0).to(device)
-    with torch.no_grad():
-        vec = model.encode_image(img_p)
-    vec /= vec.norm(dim=-1, keepdim=True)
-    return vec.cpu().numpy().astype("float32")
-
-def search(query_vec, user_lat, user_lng, threshold=0.20):
-    faiss_index, items = load_vectors_cached()
-    if faiss_index is None:
-        return []
-    D, I = faiss_index.search(query_vec, 200)
-    results, seen = [], set()
-    for score, i in zip(D[0], I[0]):
-        item = items[i]
-        if item["id"] in seen: continue
-        seen.add(item["id"])
-        score = float(max(0, min(1, score)))
-        if score < threshold: continue
-        dist = distance(user_lat, user_lng, item["latitude"], item["longitude"])
-        results.append({
-            "part_name": item["part_name"],
-            "image": item["image"],
-            "description": item.get("description") or "",
-            "function_tags": item.get("function_tags") or "",
-            "shop_name": item["shop_name"],
-            "distance": dist, "score": score,
-            "map": item["google_map_link"],
-        })
-    return results
-
-# ==================================================
-# AUTH FUNCTIONS — Email OTP System
-# ==================================================
-
-def is_valid_email(email):
-    return bool(re.match(r'^[\w\.-]+@[\w\.-]+\.\w{2,}$', email))
-
-def send_otp_email(to_email, otp, purpose="register"):
-    """ส่ง OTP ไปยังอีเมลจริงผ่าน SMTP"""
+def add_user(username, email, password):
     try:
-        smtp_host = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
-        smtp_port = int(st.secrets.get("SMTP_PORT", 587))
-        smtp_user = st.secrets["SMTP_USER"]
-        smtp_pass = st.secrets["SMTP_PASSWORD"]
+        pw_hash = hash_pw(password)
+        if USE_SUPABASE:
+            res = supabase.table("users").insert({"username": username, "email": email, "password": pw_hash}).execute()
+            return True
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, email TEXT, password TEXT)")
+            cursor.execute("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", (username, email, pw_hash))
+            conn.commit(); conn.close()
+            return True
+    except Exception as e:
+        if "UNIQUE" in str(e) or "duplicate" in str(e).lower():
+            st.warning("⚠️ มีชื่อผู้ใช้นี้อยู่ในระบบแล้ว")
+        else:
+            st.error(f"❌ ไม่สามารถบันทึกข้อมูลได้: {e}")
+        return False
 
-        subject = "🔧 FindSpares — ยืนยันอีเมลของคุณ" if purpose == "register" else "🔧 FindSpares — รีเซ็ตรหัสผ่าน"
-        action  = "สมัครสมาชิก" if purpose == "register" else "รีเซ็ตรหัสผ่าน"
+# ---------------------------
+# OTP FUNCTIONS
+# ---------------------------
+def _ensure_otp_table():
+    """Create otp_tokens table in SQLite if not exists."""
+    conn = get_db_connection()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS otp_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            otp_code TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit(); conn.close()
 
+def save_otp(email, otp_code):
+    """Save OTP to database, invalidate old ones."""
+    expires = (datetime.utcnow() + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if USE_SUPABASE:
+            supabase.table("otp_tokens").delete().eq("email", email).eq("used", 0).execute()
+            supabase.table("otp_tokens").insert({"email": email, "otp_code": str(otp_code), "expires_at": expires, "used": 0}).execute()
+        else:
+            _ensure_otp_table()
+            conn = get_db_connection()
+            conn.execute("DELETE FROM otp_tokens WHERE email = ? AND used = 0", (email,))
+            conn.execute("INSERT INTO otp_tokens (email, otp_code, expires_at, used) VALUES (?, ?, ?, 0)", (email, str(otp_code), expires))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        st.error(f"❌ บันทึก OTP ไม่สำเร็จ: {e}"); return False
+
+def verify_otp(email, otp_input):
+    """Verify OTP code. Returns True if valid and not expired."""
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if USE_SUPABASE:
+            res = supabase.table("otp_tokens").select("id").eq("email", email).eq("otp_code", str(otp_input).strip()).eq("used", 0).gt("expires_at", now).execute()
+            if res.data:
+                supabase.table("otp_tokens").update({"used": 1}).eq("id", res.data[0]["id"]).execute()
+                return True
+        else:
+            _ensure_otp_table()
+            conn = get_db_connection()
+            row = conn.execute("SELECT id FROM otp_tokens WHERE email=? AND otp_code=? AND used=0 AND expires_at>?", (email, str(otp_input).strip(), now)).fetchone()
+            if row:
+                conn.execute("UPDATE otp_tokens SET used=1 WHERE id=?", (row["id"],))
+                conn.commit(); conn.close()
+                return True
+            conn.close()
+    except Exception as e:
+        st.error(f"❌ ตรวจสอบ OTP ผิดพลาด: {e}")
+    return False
+
+def send_otp_email(to_email, otp_code):
+    """Send OTP via SMTP (Gmail). Requires SMTP_USER & SMTP_PASSWORD in secrets."""
+    smtp_user = st.secrets.get("SMTP_USER")
+    smtp_pass = st.secrets.get("SMTP_PASSWORD")
+    if not smtp_user or not smtp_pass:
+        return False  # No SMTP configured - caller handles fallback
+    try:
         html = f"""
-        <div style="font-family:Inter,sans-serif;max-width:480px;margin:auto;
-                    background:#0d1b3e;color:#fff;border-radius:16px;overflow:hidden;">
-            <div style="background:linear-gradient(135deg,#1a3a6e,#0a2a4a);
-                        padding:2rem;text-align:center;">
-                <div style="font-size:2rem;font-weight:900;
-                            background:linear-gradient(135deg,#fff,#ffa500);
-                            -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-                    🔧 FindSpares
-                </div>
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;background:#0F172A;color:#F1F5F9;border-radius:16px;overflow:hidden;">
+            <div style="background:linear-gradient(135deg,#1E3A8A,#0d1b3e);padding:2rem;text-align:center;">
+                <div style="font-size:2.2rem;font-weight:900;background:linear-gradient(135deg,#fff,#FBBF24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">🔧 FindSpares AI</div>
             </div>
             <div style="padding:2rem;text-align:center;">
-                <p style="color:rgba(255,255,255,0.7);">รหัส OTP สำหรับ{action}</p>
-                <div style="font-size:3rem;font-weight:900;letter-spacing:0.3em;
-                            color:#ffa500;margin:1.5rem 0;">{otp}</div>
-                <p style="color:rgba(255,255,255,0.45);font-size:0.85rem;">
-                    รหัสนี้ใช้ได้ภายใน <strong>10 นาที</strong><br>
-                    หากคุณไม่ได้ทำรายการนี้ กรุณาเพิกเฉย
-                </p>
+                <p style="color:rgba(255,255,255,0.7);font-size:1rem;">รหัส OTP สำหรับการสมัครสมาชิก</p>
+                <div style="font-size:3rem;font-weight:900;letter-spacing:0.4em;color:#FBBF24;margin:1.5rem 0;">{otp_code}</div>
+                <p style="color:rgba(255,255,255,0.45);font-size:0.85rem;">รหัสนี้ใช้ได้ภายใน <strong style="color:#FBBF24;">10 นาที</strong><br>หากคุณไม่ได้ทำรายการนี้ กรุณาเพิกเฉยอีเมลฉบับนี้</p>
             </div>
+            <div style="background:#1E293B;padding:1rem;text-align:center;font-size:0.75rem;color:rgba(255,255,255,0.3);">FindSpares AI - ระบบค้นหาอะไหล่ด้วย AI</div>
         </div>"""
-
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = f"FindSpares AI <{smtp_user}>"
-        msg["To"]      = to_email
+        msg["Subject"] = f"🔧 FindSpares AI — รหัส OTP ของคุณ: {otp_code}"
+        msg["From"] = f"FindSpares AI <{smtp_user}>"
+        msg["To"] = to_email
         msg.attach(MIMEText(html, "html", "utf-8"))
-
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, to_email, msg.as_string())
         return True
     except Exception as e:
-        st.error(f"❌ ส่งอีเมลไม่สำเร็จ: {e}")
-        return False
+        st.error(f"❌ ส่งอีเมลไม่สำเร็จ: {e}"); return False
 
-def save_otp(email, otp, purpose="register"):
+def toggle_favorite(user_id, part_id):
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        # ลบ OTP เก่าของ email นี้
-        cur.execute("DELETE FROM otp_tokens WHERE email=%s AND purpose=%s", (email, purpose))
-        expires = datetime.now() + timedelta(minutes=10)
-        cur.execute(
-            "INSERT INTO otp_tokens (email, otp_code, purpose, expires_at) VALUES (%s,%s,%s,%s)",
-            (email, str(otp), purpose, expires)
-        )
-        conn.commit(); conn.close()
+        if USE_SUPABASE:
+            check = supabase.table("favorites").select("id").eq("user_id", user_id).eq("part_id", part_id).execute()
+            if check.data:
+                supabase.table("favorites").delete().eq("user_id", user_id).eq("part_id", part_id).execute()
+                st.toast("🗑️ ลบจากรายการโปรดแล้ว")
+            else:
+                supabase.table("favorites").insert({"user_id": user_id, "part_id": part_id}).execute()
+                st.toast("⭐ บันทึกเป็นรายการโปรดแล้ว")
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS favorites (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, part_id INTEGER, UNIQUE(user_id, part_id))")
+            cursor.execute("SELECT id FROM favorites WHERE user_id = ? AND part_id = ?", (user_id, part_id))
+            if cursor.fetchone():
+                cursor.execute("DELETE FROM favorites WHERE user_id = ? AND part_id = ?", (user_id, part_id))
+                st.toast("🗑️ ลบจากรายการโปรดแล้ว")
+            else:
+                cursor.execute("INSERT INTO favorites (user_id, part_id) VALUES (?, ?)", (user_id, part_id))
+                st.toast("⭐ บันทึกเป็นรายการโปรดแล้ว")
+            conn.commit(); conn.close()
         return True
-    except:
+    except Exception as e:
+        st.error(f"❌ เกิดข้อผิดพลาดในระบบฐานข้อมูล: {e}")
         return False
 
-def verify_otp(email, otp_input, purpose="register"):
+def get_user_favorites(user_id):
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute("""
-            SELECT id FROM otp_tokens
-            WHERE email=%s AND otp_code=%s AND purpose=%s
-              AND used=0 AND expires_at > NOW()
-            ORDER BY id DESC LIMIT 1
-        """, (email, str(otp_input).strip(), purpose))
-        row = cur.fetchone()
-        if row:
-            cur.execute("UPDATE otp_tokens SET used=1 WHERE id=%s", (row["id"],))
-            conn.commit()
-        conn.close()
-        return row is not None
+        if USE_SUPABASE:
+            res = supabase.table("favorites").select("part_id").eq("user_id", user_id).execute()
+            return [r["part_id"] for r in res.data]
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS favorites (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, part_id INTEGER, UNIQUE(user_id, part_id))")
+            cursor.execute("SELECT part_id FROM favorites WHERE user_id = ?", (user_id,))
+            rows = cursor.fetchall(); conn.close()
+            return [r["part_id"] for r in rows]
     except:
-        return False
+        return []
 
-def db_register(email, display_name, password):
-    try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute(
-            "INSERT INTO users (username, email, password, display_name, is_verified) VALUES (%s,%s,%s,%s,1)",
-            (email, email, hash_pw(password), display_name)
-        )
-        conn.commit()
-        user_id = cur.lastrowid
-        conn.close()
-        return {"id": user_id, "username": display_name or email}
-    except pymysql.IntegrityError:
-        return "duplicate"
-    except:
-        return False
-
-def db_login(email, password):
-    try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute(
-            "SELECT id, display_name, email, is_verified FROM users WHERE email=%s AND password=%s",
-            (email, hash_pw(password))
-        )
-        user = cur.fetchone()
-        conn.close()
-        return user
-    except:
-        return None
-
-def db_reset_password(email, new_password):
-    try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute("UPDATE users SET password=%s WHERE email=%s", (hash_pw(new_password), email))
-        conn.commit(); conn.close()
-        return cur.rowcount > 0
-    except:
-        return False
-
-def db_email_exists(email):
-    try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute("SELECT id FROM users WHERE email=%s", (email,))
-        r = cur.fetchone(); conn.close()
-        return r is not None
-    except:
-        return False
-
-
-# ==================================================
-# PAGE: LANDING
-# ==================================================
-def page_landing():
-    st.markdown("""
-    <div class="landing-wrap">
-        <div class="gear-bg">⚙️</div>
-        <div class="gear-bg2">🔩</div>
-        <div class="landing-badge">🔧 AI-Powered Spare Parts</div>
-        <div class="landing-logo">FindSpares</div>
-        <div class="landing-sub">ค้นหาอะไหล่รถยนต์ด้วย AI · รวดเร็ว · แม่นยำ · ใกล้คุณ</div>
-        <div class="landing-features">
-            <span class="feat-pill">🤖 CLIP AI Search</span>
-            <span class="feat-pill">📷 ค้นหาด้วยรูปภาพ</span>
-            <span class="feat-pill">📍 ร้านใกล้คุณ</span>
-            <span class="feat-pill">🔤 ค้นหาจากหน้าที่อะไหล่</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col1, col2, col3 = st.columns([2, 1, 2])
-    with col2:
-        if st.button("🚀  เริ่มต้นใช้งาน", use_container_width=True,
-                     type="primary"):
-            st.session_state.nav = "auth"
+# ---------------------------
+# UI CUSTOMIZATION (SIDEBAR)
+# ---------------------------
+with st.sidebar:
+    st.title("FindSpares AI")
+    if st.session_state.authenticated:
+        st.success(f"👤 สวัสดีคุณ {st.session_state.username}")
+        if st.button("🚪 Logout"):
+            st.session_state.authenticated = False
+            st.session_state.username = None
+            st.session_state.user_id = None
             st.rerun()
+    
+    st.title("Settings")
+    theme_mode = st.toggle("🌙 Night Mode", value=True)
+    
+    st.divider()
+    st.header("🎯 ตัวกรองการค้นหา")
+    max_dist = st.slider("📏 ระยะทางสูงสุด (กม.)", 0, 100, 50)
+    min_match = st.slider("🤖 ความแม่นยำ AI (%)", 0, 100, 40)
+    st.session_state.max_dist = max_dist
+    st.session_state.min_match = min_match / 100
 
-# ==================================================
-# PAGE: AUTH (Login / Register / OTP)
-# ==================================================
-def page_auth():
-    st.markdown("""
-    <div style="min-height:100vh; background:linear-gradient(135deg,#0a0a1a,#0d1b3e,#051020);
-                display:flex; align-items:center; justify-content:center; padding:2rem;">
-    </div>
-    """, unsafe_allow_html=True)
+    st.divider()
+    with st.expander("🛠️ Developer Tools (Debug DB)"):
+        st.write("ตรวจสอบข้อมูลในฐานข้อมูล")
+        db_tables = ["users", "favorites", "shops", "shop_parts", "part_embeddings"]
+        selected_table = st.selectbox("เลือกตารางเพื่อดูข้อมูล", db_tables)
+        if st.button("👁️ ดึงข้อมูลตาราง", use_container_width=True):
+            try:
+                if USE_SUPABASE:
+                    res = supabase.table(selected_table).select("*").limit(100).execute()
+                    st.dataframe(res.data)
+                else:
+                    conn = get_db_connection()
+                    st.dataframe(conn.execute(f"SELECT * FROM {selected_table} LIMIT 100").fetchall())
+                    conn.close()
+            except Exception as e:
+                st.error(f"⚠️ ไม่สามารถเรียกดูข้อมูลได้: {e}")
+    
+    st.divider()
+    st.markdown("FindSpares AI matches your requirements with local shop data using CLIP models.")
 
-    col1, col2, col3 = st.columns([1, 1.3, 1])
+theme_css = f"""
+<style>
+@media (max-width: 640px) {{
+    .main .block-container {{ padding: 1rem !important; }}
+    h1 {{ font-size: 1.8rem !important; }}
+}}
+.stCard {{
+    border-radius: 12px; padding: 15px; margin-bottom: 20px;
+    border: 1px solid #1E3A8A; transition: transform 0.2s;
+    background-color: rgba(30, 58, 138, 0.05);
+}}
+.stCard:hover {{
+    transform: translateY(-5px); box-shadow: 0 4px 15px rgba(251, 191, 36, 0.3);
+}}
+/* Custom Button Style */
+div.stButton > button {{
+    background-color: #1E3A8A !important; color: #FBBF24 !important;
+    border: 1px solid #FBBF24 !important; border-radius: 8px !important;
+}}
+div.stButton > button:hover {{
+    background-color: #FBBF24 !important; color: #1E3A8A !important;
+}}
+div.stLinkButton > a {{
+    background-color: #FBBF24 !important; color: #1E3A8A !important;
+    border-radius: 8px !important; font-weight: bold !important;
+}}
+</style>
+"""
+if theme_mode:
+    theme_css += """
+<style>
+.stApp { background-color: #0F172A; color: #F1F5F9; }
+[data-testid="stHeader"] { background-color: rgba(15, 23, 42, 0.9); }
+h1, h2, h3, p, span, label { color: #F1F5F9 !important; }
+.stTextInput input, .stFileUploader section { background-color: #1E293B !important; color: white !important; border: 1px solid #1E3A8A !important; }
+.stProgress > div > div > div > div { background-color: #FBBF24 !important; }
+</style>
+"""
+else:
+    theme_css += """
+<style>
+.stApp { background-color: #F8FAFC; }
+[data-testid="stMain"] h1, [data-testid="stMain"] h2, [data-testid="stMain"] h3, 
+[data-testid="stMain"] p, [data-testid="stMain"] span, [data-testid="stMain"] label, 
+[data-testid="stMain"] div, [data-testid="stMain"] .stMarkdown, 
+[data-testid="stMain"] button[data-baseweb="tab"] p { 
+    color: #1E293B !important; 
+}
+[data-testid="stMain"] div.stButton > button, 
+[data-testid="stMain"] div.stLinkButton > a { 
+    color: #FBBF24 !important; 
+}
+/* Full-screen Dialog for Mobile (Google Lens style) */
+@media (max-width: 640px) {
+    div[data-testid="stDialog"] div[role="dialog"] {
+        width: 100vw !important; height: 100vh !important;
+        min-width: 100vw !important; min-height: 100vh !important;
+        margin: 0 !important; padding: 0 !important;
+        position: fixed !important; top: 0 !important; left: 0 !important; border-radius: 0 !important;
+    }
+    div[data-testid="stDialog"] [data-testid="stVerticalBlock"] { padding: 0 !important; }
+}
+.stProgress > div > div > div > div { background-color: #1E3A8A !important; }
+</style>
+"""
+st.markdown(theme_css, unsafe_allow_html=True)
+
+# ---------------------------
+# SCREENS
+# ---------------------------
+def render_auth():
+    st.markdown("<h1 style='text-align: center;'>🔐 ยินดีต้อนรับสู่ FindSpares AI</h1>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        # Header
-        st.markdown("""
-        <div style="text-align:center; margin-bottom:1.5rem;">
-            <div style="font-size:2.5rem; font-weight:900;
-                        background:linear-gradient(135deg,#fff,#ffa500);
-                        -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-                🔧 FindSpares
-            </div>
-            <div style="color:rgba(255,255,255,0.45); font-size:0.9rem; margin-top:0.25rem;">
-                ระบบยืนยันตัวตนด้วยอีเมลจริง (Email OTP Authentication)
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        tab_login, tab_reg = st.tabs(["🔑 เข้าสู่ระบบ", "📝 ลงทะเบียน (Email OTP)"])
 
-        # Check SMTP settings in Secrets
-        has_smtp = "SMTP_USER" in st.secrets and "SMTP_PASSWORD" in st.secrets
-
-        tab_login, tab_reg, tab_reset = st.tabs(["🔑 เข้าสู่ระบบ", "✨ สมัครสมาชิก (OTP)", "🔒 ลืมรหัสผ่าน"])
-
-        # --------------------------------------------------
-        # 1. LOGIN TAB
-        # --------------------------------------------------
+        # ─── LOGIN TAB ───────────────────────────────────────
         with tab_login:
-            with st.form("login_form"):
-                login_email = st.text_input("อีเมล", placeholder="example@email.com", key="l_email")
-                login_pw = st.text_input("รหัสผ่าน", type="password", placeholder="กรอกรหัสผ่าน", key="l_pw")
-                submitted = st.form_submit_button("เข้าสู่ระบบ", use_container_width=True, type="primary")
-
-                if submitted:
-                    if not login_email or not login_pw:
-                        st.warning("⚠️ กรุณากรอกอีเมลและรหัสผ่าน")
+            with st.form("login"):
+                u = st.text_input("Username")
+                p = st.text_input("Password", type="password")
+                if st.form_submit_button("เข้าสู่ระบบ", use_container_width=True):
+                    uid = verify_user(u, p)
+                    if uid:
+                        st.session_state.authenticated = True
+                        st.session_state.username = u
+                        st.session_state.user_id = uid
+                        st.rerun()
                     else:
-                        with st.spinner("กำลังตรวจสอบข้อมูล..."):
-                            user = db_login(login_email.strip(), login_pw)
-                        if user:
-                            disp_name = user.get("display_name") or user.get("email") or "ผู้ใช้งาน"
-                            st.session_state.user = {"id": user["id"], "username": disp_name, "email": user.get("email")}
-                            st.session_state.nav = "main"
-                            st.success(f"🎉 ยินดีต้อนรับ {disp_name}!")
-                            st.rerun()
-                        else:
-                            st.error("❌ อีเมลหรือรหัสผ่านไม่ถูกต้อง")
+                        st.error("❌ Username หรือ Password ไม่ถูกต้อง")
 
-            st.markdown("<div style='text-align:center; margin-top:0.5rem;'>", unsafe_allow_html=True)
-            if st.button("ดำเนินการต่อในฐานะผู้เยี่ยมชม →", use_container_width=True, key="btn_guest"):
-                st.session_state.user = {"id": None, "username": "ผู้เยี่ยมชม", "email": None}
-                st.session_state.nav = "main"
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # --------------------------------------------------
-        # 2. REGISTER TAB (Email OTP)
-        # --------------------------------------------------
+        # ─── REGISTER TAB (2-Step OTP) ────────────────────────
         with tab_reg:
-            if "reg_step" not in st.session_state:
-                st.session_state.reg_step = 1  # 1: Info form, 2: OTP verify
+            has_smtp = bool(st.secrets.get("SMTP_USER") and st.secrets.get("SMTP_PASSWORD"))
+            if not has_smtp:
+                st.info("💡 **โหมดทดสอบ:** ยังไม่ได้ตั้งค่า SMTP — รหัส OTP จะแสดงในหน้าจอแทนการส่งอีเมลจริง")
 
+            # ── Step 1: กรอกข้อมูล ──
             if st.session_state.reg_step == 1:
-                st.markdown("<div style='font-weight:600; margin-bottom:0.5rem;'>ขั้นตอนที่ 1: กรอกข้อมูลสมัครสมาชิก</div>", unsafe_allow_html=True)
-                r_email = st.text_input("อีเมล (เพื่อรับรหัส OTP)", placeholder="yourname@gmail.com", key="r_email")
-                r_name = st.text_input("ชื่อผู้ใช้งาน (Display Name)", placeholder="เช่น สมชาย สายลุย", key="r_name")
-                r_pw = st.text_input("รหัสผ่าน", type="password", placeholder="อย่างน้อย 6 ตัวอักษร", key="r_pw")
-                r_pw2 = st.text_input("ยืนยันรหัสผ่าน", type="password", placeholder="พิมพ์รหัสผ่านอีกครั้ง", key="r_pw2")
+                st.caption("ขั้นตอนที่ 1/2 — กรอกข้อมูลสมาชิก")
+                with st.form("reg_form"):
+                    r_user  = st.text_input("Username", placeholder="ชื่อผู้ใช้งาน")
+                    r_email = st.text_input("Email", placeholder="yourname@gmail.com")
+                    r_pw    = st.text_input("Password", type="password", placeholder="อย่างน้อย 6 ตัวอักษร")
+                    r_pw2   = st.text_input("ยืนยัน Password", type="password")
+                    send_btn = st.form_submit_button("📩 ส่งรหัส OTP ไปยังอีเมล", use_container_width=True)
 
-                if st.button("📩 ส่งรหัส OTP ไปยังอีเมล", use_container_width=True, type="primary", key="btn_send_reg_otp"):
-                    email_clean = r_email.strip()
-                    if not all([email_clean, r_name, r_pw, r_pw2]):
+                if send_btn:
+                    if not all([r_user, r_email, r_pw, r_pw2]):
                         st.warning("⚠️ กรุณากรอกข้อมูลให้ครบทุกช่อง")
-                    elif not is_valid_email(email_clean):
-                        st.error("❌ รูปแบบอีเมลไม่ถูกต้อง")
                     elif r_pw != r_pw2:
-                        st.error("❌ รหัสผ่านทั้งสองช่องไม่ตรงกัน")
+                        st.error("❌ รหัสผ่านไม่ตรงกัน")
                     elif len(r_pw) < 6:
-                        st.warning("⚠️ รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร")
-                    elif db_email_exists(email_clean):
-                        st.error("❌ อีเมลนี้ถูกลงทะเบียนแล้ว กรุณาเข้าสู่ระบบ")
+                        st.warning("⚠️ รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร")
                     else:
-                        otp_code = f"{random.randint(100000, 999999)}"
-                        save_otp(email_clean, otp_code, purpose="register")
-
-                        with st.spinner(f"📧 กำลังส่ง OTP ไปที่ {email_clean}..."):
+                        otp_code = str(random.randint(100000, 999999))
+                        if save_otp(r_email, otp_code):
                             if has_smtp:
-                                sent = send_otp_email(email_clean, otp_code, purpose="register")
+                                sent = send_otp_email(r_email, otp_code)
+                                if sent:
+                                    st.success(f"✅ ส่ง OTP ไปที่ **{r_email}** แล้ว! กรุณาตรวจสอบกล่องจดหมาย")
+                                else:
+                                    st.error("❌ ส่งอีเมลไม่สำเร็จ — กรุณาตรวจสอบการตั้งค่า SMTP")
+                                    st.stop()
                             else:
-                                sent = True
-                                st.info(f"💡 [โหมดทดสอบ - ยังไม่ได้ตั้งค่า SMTP] รหัส OTP ของคุณคือ: **{otp_code}**")
-
-                        if sent:
-                            st.session_state.reg_data = {
-                                "email": email_clean,
-                                "name": r_name.strip(),
-                                "pw": r_pw
-                            }
+                                st.info(f"🔑 **[ทดสอบ] รหัส OTP ของคุณคือ: `{otp_code}`** (หมดอายุใน 10 นาที)")
+                            st.session_state.reg_pending = {"username": r_user, "email": r_email, "password": r_pw}
                             st.session_state.reg_step = 2
-                            st.success(f"✅ ส่งรหัส OTP ไปยัง {email_clean} เรียบร้อยแล้ว")
                             st.rerun()
 
+            # ── Step 2: ยืนยัน OTP ──
             elif st.session_state.reg_step == 2:
-                reg_info = st.session_state.get("reg_data", {})
-                target_email = reg_info.get("email", "")
+                pending = st.session_state.reg_pending
+                st.caption("ขั้นตอนที่ 2/2 — ยืนยัน OTP")
+                st.info(f"✉️ ส่งรหัส OTP 6 หลักไปที่: **{pending.get('email', '')}**")
+                otp_input = st.text_input("กรอกรหัส OTP", max_chars=6, placeholder="123456")
 
-                st.info(f"✉️ ระบบส่งรหัส OTP 6 หลักไปที่: **{target_email}** (หมดอายุใน 10 นาที)")
-
-                otp_input = st.text_input("กรอกรหัส OTP (6 หลัก)", max_chars=6, placeholder="123456", key="reg_otp_input")
-
-                col_v1, col_v2 = st.columns(2)
-                with col_v1:
-                    if st.button("✅ ยืนยัน OTP & สมัคร", use_container_width=True, type="primary"):
-                        if not otp_input or len(otp_input) != 6:
-                            st.warning("⚠️ กรุณากรอกรหัส OTP ให้ครบ 6 หลัก")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("✅ ยืนยัน OTP & สมัครสมาชิก", use_container_width=True, type="primary"):
+                        if len(otp_input.strip()) != 6:
+                            st.warning("⚠️ กรุณากรอกรหัส 6 หลักให้ครบ")
+                        elif verify_otp(pending["email"], otp_input):
+                            ok = add_user(pending["username"], pending["email"], pending["password"])
+                            if ok:
+                                st.success("🎉 สมัครสมาชิกสำเร็จ! กรุณาเข้าสู่ระบบ")
+                                st.session_state.reg_step = 1
+                                st.session_state.reg_pending = {}
+                                st.rerun()
                         else:
-                            with st.spinner("กำลังตรวจสอบ OTP..."):
-                                is_ok = verify_otp(target_email, otp_input, purpose="register")
-                            if is_ok:
-                                res = db_register(target_email, reg_info["name"], reg_info["pw"])
-                                if isinstance(res, dict):
-                                    st.success("🎉 สมัครสมาชิกและยืนยันอีเมลสำเร็จแล้ว!")
-                                    st.session_state.user = res
-                                    st.session_state.reg_step = 1
-                                    st.session_state.nav = "main"
-                                    st.rerun()
-                                elif res == "duplicate":
-                                    st.error("❌ อีเมลนี้ถูกใช้สมัครไปแล้ว")
-                                else:
-                                    st.error("❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล")
-                            else:
-                                st.error("❌ รหัส OTP ไม่ถูกต้อง หรือหมดอายุแล้ว")
-
-                with col_v2:
-                    if st.button("← แก้ไขข้อมูล / ขอ OTP ใหม่", use_container_width=True):
+                            st.error("❌ รหัส OTP ไม่ถูกต้อง หรือหมดอายุแล้ว")
+                with c2:
+                    if st.button("← แก้ไขข้อมูล", use_container_width=True):
                         st.session_state.reg_step = 1
                         st.rerun()
 
-        # --------------------------------------------------
-        # 3. FORGOT PASSWORD TAB (OTP Reset)
-        # --------------------------------------------------
-        with tab_reset:
-            if "reset_step" not in st.session_state:
-                st.session_state.reset_step = 1
+def render_main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    @st.cache_resource
+    def load_clip_model():
+        model, preprocess = clip.load("ViT-B/32", device=device)
+        return model, preprocess
+    model, preprocess = load_clip_model()
 
-            if st.session_state.reset_step == 1:
-                st.caption("กรอกอีเมลของคุณเพื่อรับรหัส OTP สำหรับตั้งรหัสผ่านใหม่")
-                reset_email = st.text_input("อีเมลที่เคยลงทะเบียน", placeholder="yourname@gmail.com", key="reset_email_input")
+    @st.cache_resource
+    def load_vectors_cached():
+        if USE_SUPABASE:
+            res = supabase.table("part_embeddings").select("*, shop_parts(*, shops(*))").execute()
+            data = res.data
+            if not data: return None, []
+            vectors, items = [], []
+            for d in data:
+                try:
+                    sp = d["shop_parts"]; s = sp["shops"]
+                    item_dict = {
+                        "id": sp["id"], "part_name": sp["part_name"], "image": sp["image"],
+                        "shop_name": s["shop_name"], "latitude": s["latitude"], 
+                        "longitude": s["longitude"], "google_map_link": s["google_map_link"]
+                    }
+                    vec = np.array(d["embedding"]).astype("float32")
+                    vec = vec / np.linalg.norm(vec)
+                    vectors.append(vec); items.append(item_dict)
+                except: continue
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT sp.id, sp.part_name, sp.image, s.shop_name, s.latitude, s.longitude, s.google_map_link, pe.embedding FROM part_embeddings pe JOIN shop_parts sp ON pe.part_id=sp.id JOIN shops s ON sp.shop_id=s.id")
+            rows = cursor.fetchall(); conn.close()
+            if not rows: return None, []
+            vectors, items = [], []
+            for d in rows:
+                item_dict = dict(d)
+                vec = np.array(json.loads(item_dict["embedding"])).astype("float32")
+                vec = vec / np.linalg.norm(vec)
+                vectors.append(vec); items.append(item_dict)
+        if not vectors: return None, []
+        vectors = np.array(vectors)
+        idx = faiss.IndexFlatIP(vectors.shape[1]); idx.add(vectors)
+        return idx, items
 
-                if st.button("📩 ส่ง OTP รีเซ็ตรหัสผ่าน", use_container_width=True, type="primary", key="btn_send_reset_otp"):
-                    em_clean = reset_email.strip()
-                    if not em_clean or not is_valid_email(em_clean):
-                        st.warning("⚠️ กรุณากรอกอีเมลให้ถูกต้อง")
-                    elif not db_email_exists(em_clean):
-                        st.error("❌ ไม่พบอีเมลนี้ในระบบ")
-                    else:
-                        otp_code = f"{random.randint(100000, 999999)}"
-                        save_otp(em_clean, otp_code, purpose="reset")
+    with st.spinner("📦 กำลังโหลดข้อมูล..."):
+        idx, items = load_vectors_cached()
 
-                        with st.spinner(f"📧 กำลังส่ง OTP ไปยัง {em_clean}..."):
-                            if has_smtp:
-                                sent = send_otp_email(em_clean, otp_code, purpose="reset")
-                            else:
-                                sent = True
-                                st.info(f"💡 [โหมดทดสอบ - ยังไม่ได้ตั้งค่า SMTP] รหัส OTP ของคุณคือ: **{otp_code}**")
-
-                        if sent:
-                            st.session_state.reset_target_email = em_clean
-                            st.session_state.reset_step = 2
-                            st.success(f"✅ ส่ง OTP ไปยัง {em_clean} แล้ว")
-                            st.rerun()
-
-            elif st.session_state.reset_step == 2:
-                target_em = st.session_state.get("reset_target_email", "")
-                st.info(f"🔑 ตั้งรหัสผ่านใหม่สำหรับ: **{target_em}**")
-
-                rst_otp = st.text_input("รหัส OTP 6 หลัก", max_chars=6, placeholder="123456", key="rst_otp")
-                new_pw1 = st.text_input("รหัสผ่านใหม่", type="password", placeholder="อย่างน้อย 6 ตัวอักษร", key="rst_pw1")
-                new_pw2 = st.text_input("ยืนยันรหัสผ่านใหม่", type="password", placeholder="พิมพ์รหัสผ่านอีกครั้ง", key="rst_pw2")
-
-                col_r1, col_r2 = st.columns(2)
-                with col_r1:
-                    if st.button("💾 บันทึกรหัสผ่านใหม่", use_container_width=True, type="primary"):
-                        if not rst_otp or len(rst_otp) != 6:
-                            st.warning("⚠️ กรุณากรอก OTP 6 หลัก")
-                        elif not new_pw1 or len(new_pw1) < 6:
-                            st.warning("⚠️ รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร")
-                        elif new_pw1 != new_pw2:
-                            st.error("❌ รหัสผ่านใหม่ไม่ตรงกัน")
-                        else:
-                            with st.spinner("กำลังเปลี่ยนรหัสผ่าน..."):
-                                if verify_otp(target_em, rst_otp, purpose="reset"):
-                                    if db_reset_password(target_em, new_pw1):
-                                        st.success("🎉 เปลี่ยนรหัสผ่านสำเร็จ! กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่")
-                                        st.session_state.reset_step = 1
-                                    else:
-                                        st.error("❌ เปลี่ยนรหัสผ่านไม่สำเร็จ")
-                                else:
-                                    st.error("❌ รหัส OTP ไม่ถูกต้องหรือหมดอายุ")
-
-                with col_r2:
-                    if st.button("ย้อนกลับ", use_container_width=True, key="btn_back_reset"):
-                        st.session_state.reset_step = 1
-                        st.rerun()
-
-        # Back button
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("← กลับหน้าแรก", use_container_width=True):
-            st.session_state.nav = "landing"
+    if idx is None:
+        st.warning("⚠️ ฐานข้อมูลว่างเปล่า กรุณาเพิ่มข้อมูลอะไหล่ใน Supabase/SQLite ก่อนใช้งานครับ")
+        if st.button("🔄 โหลดข้อมูลใหม่ (Refresh Cache)", use_container_width=True):
+            st.cache_resource.clear()
             st.rerun()
 
+    def encode_text(text):
+        tokens = clip.tokenize([text], truncate=True).to(device)
+        with torch.no_grad(): vec = model.encode_text(tokens)
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+        return vec.cpu().numpy().astype("float32")
 
-# ==================================================
-# PAGE: MAIN SEARCH
-# ==================================================
-def page_main():
-    # Navbar
-    user_name = st.session_state.user["username"] if st.session_state.user else "ผู้เยี่ยมชม"
-    col_logo, col_space, col_user = st.columns([2, 5, 2])
-    with col_logo:
-        st.markdown("""
-        <div style="padding:1rem 0; font-size:1.4rem; font-weight:800;
-                    background:linear-gradient(135deg,#fff,#ffa500);
-                    -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-            🔧 FindSpares
-        </div>""", unsafe_allow_html=True)
-    with col_user:
-        st.markdown(f"""
-        <div style="padding:1.1rem 0; text-align:right;
-                    color:rgba(255,255,255,0.6); font-size:0.85rem;">
-            👤 {user_name}
-        </div>""", unsafe_allow_html=True)
-    if col_user.button("ออกจากระบบ", key="logout"):
-        st.session_state.user = None
-        st.session_state.nav = "landing"
-        st.session_state.results = None
-        st.rerun()
+    def encode_image(img):
+        proc = preprocess(img).unsqueeze(0).to(device)
+        with torch.no_grad(): vec = model.encode_image(proc)
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+        return vec.cpu().numpy().astype("float32")
 
-    st.divider()
+    def search_parts(q_vec, lat, lng, q_text=None):
+        if idx is None: return []
+        D, I = idx.search(q_vec, min(200, len(items)))
+        results, seen = [], set()
 
-    # Load vectors
-    with st.spinner("📦 กำลังโหลดข้อมูลอะไหล่..."):
-        faiss_index, items = load_vectors_cached()
-    if faiss_index is None:
-        st.warning("⚠️ ไม่พบข้อมูลเวกเตอร์ในฐานข้อมูล")
-        return
+        # Expand Keywords for Smart Filtering
+        search_terms = []
+        if q_text:
+            q_low = q_text.lower()
+            search_terms.append(q_low)
+            for category, syns in SYNONYM_MAP.items():
+                if q_low == category.lower() or any(s.lower() in q_low for s in syns):
+                    search_terms.extend([s.lower() for s in syns])
+            search_terms = list(set(search_terms))
 
-    # Location (demo)
-    user_lat, user_lng = 13.2839215, 100.9289055
+        for score, i in zip(D[0], I[0]):
+            if i == -1: continue
+            item = items[i]
+            if item["id"] in seen: continue
+            
+            # Smart Filter
+            if search_terms:
+                name_low = item["part_name"].lower()
+                if not any(term in name_low for term in search_terms): 
+                    continue
 
-    # Search UI
-    st.markdown("### 🔍 ค้นหาอะไหล่")
-    st.caption("พิมพ์ชื่ออะไหล่ หรือบอกลักษณะ/หน้าที่ เช่น 'กรองอากาศ', 'ระบายความร้อน', 'ลดแรงกระแทก'")
+            seen.add(item["id"])
+            R = 6371
+            dlat, dlon = math.radians(item["latitude"]-lat), math.radians(item["longitude"]-lng)
+            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat)) * math.cos(math.radians(item["latitude"])) * math.sin(dlon/2)**2
+            dist = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+            results.append({
+                "id": item["id"], "part_name": item["part_name"], "image": item["image"], "shop_name": item["shop_name"],
+                "distance": dist, "score": float(max(0, min(1, score))), "map": item["google_map_link"]
+            })
+        return results
 
-    col1, col2 = st.columns([3, 2])
-    with col1:
-        query = st.text_input("คำค้นหา", placeholder="เช่น กรองอากาศ, ดูดน้ำมัน, หยุดรถ...", label_visibility="collapsed")
+    st.title("🔧 FindSpares AI Search")
+    tab_search, tab_fav = st.tabs(["🔍 ค้นหาอะไหล่", "⭐ รายการโปรด"])
+    
+    @st.dialog("📸 FindSpares Scanner", width="large")
+    def camera_modal():
+        c_img = st.camera_input("แสกนอะไหล่", label_visibility="collapsed")
+        if c_img:
+            with st.spinner("🔎 Searching..."):
+                img = Image.open(c_img).convert("RGB")
+                vec = encode_image(img)
+                res = search_parts(vec, 13.2839, 100.9289)
+                st.session_state.results = sorted(res, key=lambda x: (-x["score"], x["distance"]))
+                st.session_state.page = 1
+                st.rerun()
+
+    with tab_search:
+        st.info("📍 ค้นหาด้วยชื่อ หรือ อัปโหลด/ถ่ายรูป")
+        scol, ccol = st.columns([7, 1])
+        with scol:
+            q = st.text_input("🔍 พิมพ์ชื่ออะไหล่ หรือ อัปโหลดรูป", key="search_q", label_visibility="collapsed")
+        with ccol:
+            if st.button("📸", key="btn_cam_modal", help="เปิดกล้องแสกนอะไหล่"):
+                camera_modal()
+        up = st.file_uploader("📁 อัปโหลดรูปภาพ", type=["jpg","png","jpeg"], label_visibility="collapsed")
+        
+        if q or up:
+            with st.spinner("🔎 กำลังประมวลผล..."):
+                if up:
+                    img = Image.open(up).convert("RGB"); vec = encode_image(img)
+                    res = search_parts(vec, 13.2839, 100.9289)
+                elif q:
+                    res = search_parts(encode_text(q), 13.2839, 100.9289, q)
+                if 'res' in locals():
+                    st.session_state.results = sorted(res, key=lambda x: (-x["score"], x["distance"]))
+                    st.session_state.page = 1
+
+        if st.session_state.get("results"):
+            max_d = st.session_state.get("max_dist", 50); min_m = st.session_state.get("min_match", 0.4)
+            filtered_res = [r for r in st.session_state.results if r["distance"] <= max_d and r["score"] >= min_m]
+            if filtered_res: render_grid(filtered_res)
+            else: st.warning(f"🔎 ไม่พบอะไหล่ภายในระยะ {max_d} กม. หรือ Match > {int(min_m*100)}%")
+
+    with tab_fav:
+        fav_ids = get_user_favorites(st.session_state.user_id)
+        if not fav_ids: st.info("คุณยังไม่มีรายการโปรด")
+        else:
+            fav_items = [item for item in items if item["id"] in fav_ids]
+            res = []
+            for item in fav_items:
+                res.append({"id": item["id"], "part_name": item["part_name"], "image": item["image"], "shop_name": item["shop_name"], "distance": 0, "score": 1.0, "map": item["google_map_link"]})
+            render_grid(res, is_fav_view=True)
+
+def render_grid(results, is_fav_view=False):
+    per_page = 9; total_p = math.ceil(len(results)/per_page); page = st.session_state.get("page", 1)
+    page_res = results[(page-1)*per_page : page*per_page]
+    fav_ids = get_user_favorites(st.session_state.user_id)
+    cols = st.columns(3)
+    for i, r in enumerate(page_res):
+        with cols[i % 3]:
+            with st.container(border=True):
+                path = f"shop_parts/{r['image']}"
+                if os.path.exists(path): st.image(path, use_container_width=True)
+                else: st.image("https://via.placeholder.com/300x200?text=No+Image", use_container_width=True)
+                h1, h2 = st.columns([4, 1])
+                with h1: st.subheader(r['part_name'])
+                with h2:
+                    star_icon = "⭐" if r["id"] in fav_ids else "☆"
+                    if st.button(star_icon, key=f"fav_{r['id']}_{'v' if is_fav_view else 's'}"):
+                        toggle_favorite(st.session_state.user_id, r["id"]); st.rerun()
+                st.write(f"🏪 {r['shop_name']}")
+                if not is_fav_view:
+                    st.write(f"📍 {r['distance']:.2f} กม.")
+                    st.progress(r["score"], text=f"Match: {int(r['score']*100)}%")
+                st.link_button("🗺️ แผนที่", r['map'], use_container_width=True)
+    if total_p > 1:
+        pc1, pc2, pc3 = st.columns([1, 2, 1])
+        with pc1:
+            if st.button("⬅️ ก่อนหน้า", key="prev") and page > 1: st.session_state.page -= 1; st.rerun()
+        with pc2: st.write(f"หน้า {page}/{total_p}")
+        with pc3:
+            if st.button("ถัดไป ➡️", key="next") and page < total_p: st.session_state.page += 1; st.rerun()
+def render_landing():
+    # Hide sidebar on landing page
+    st.markdown("""
+    <style>
+        [data-testid="stSidebar"] { display: none; }
+        .landing-container {
+            display: flex; flex-direction: column; 
+            align-items: center; justify-content: center;
+            height: 70vh; text-align: center;
+        }
+        .landing-title {
+            font-size: 5rem; font-weight: 900;
+            background: linear-gradient(135deg, #1E3A8A 0%, #FBBF24 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+        .landing-subtitle {
+            font-size: 1.5rem; color: #64748B; margin-bottom: 3rem;
+        }
+    </style>
+    <div class="landing-container">
+        <div class="landing-title">FindSpares AI</div>
+        <div class="landing-subtitle">ระบบค้นหาชิ้นส่วนอะไหล่ด้วย AI อัจฉริยะ</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        upload = st.file_uploader("อัปโหลดรูปภาพ", label_visibility="collapsed", type=["jpg","jpeg","png","webp"])
-
-    col_btn, col_clear = st.columns([3, 1])
-    with col_btn:
-        search_btn = st.button("🚀 ค้นหาด้วย AI", use_container_width=True, type="primary")
-    with col_clear:
-        if st.button("🗑️ ล้าง", use_container_width=True):
-            st.session_state.results = None
-            st.session_state.search_page = 1
+        if st.button("🚀 เริ่มต้นใช้งาน", use_container_width=True, type="primary"):
+            st.session_state.has_started = True
             st.rerun()
 
-    if search_btn:
-        st.session_state.search_page = 1
-        with st.spinner("🔎 AI กำลังประมวลผล..."):
-            if upload:
-                img = Image.open(upload)
-                query_vec = encode_image(img)
-            elif query.strip():
-                query_text = translate_keyword(query)
-                query_vec = encode_text(query_text)
-            else:
-                st.warning("⚠️ กรุณาพิมพ์คำค้นหา หรืออัปโหลดรูปภาพ")
-                st.stop()
-
-            results = search(query_vec, user_lat, user_lng, threshold=0.20)
-            results = sorted(results, key=lambda x: (-x["score"], x["distance"]))
-            st.session_state.results = results
-
-        if not results:
-            st.info("🔍 ไม่พบอะไหล่ที่ตรงกัน ลองใช้คำอื่น เช่น 'กรองอากาศ', 'ระบายความร้อน'")
-
-    # Results
-    if st.session_state.results:
-        results = st.session_state.results
-        per_page = 9
-        page = st.session_state.search_page
-        total_pages = math.ceil(len(results) / per_page)
-        page_results = results[(page-1)*per_page : page*per_page]
-
-        st.markdown(f"<div style='color:rgba(255,255,255,0.45); font-size:0.85rem; margin-bottom:1rem;'>พบ {len(results)} รายการ</div>", unsafe_allow_html=True)
-        cols = st.columns(3)
-        for i, r in enumerate(page_results):
-            with cols[i % 3]:
-                img_path = f"shop_parts/{r['image']}"
-                if r["image"] and os.path.exists(img_path):
-                    st.image(img_path, use_container_width=True)
-                else:
-                    st.image("https://via.placeholder.com/300x200?text=No+Image", use_container_width=True)
-
-                st.markdown(f"**{r['part_name']}**")
-                if r.get("description"):
-                    st.caption(f"📝 {r['description'][:80]}{'...' if len(r['description'])>80 else ''}")
-                if r.get("function_tags"):
-                    tags = [t.strip() for t in r["function_tags"].split(",") if t.strip()][:4]
-                    st.markdown(" ".join([f"`{t}`" for t in tags]))
-                st.write(f"🏪 {r['shop_name']}  |  📍 {r['distance']:.1f} กม.  |  ⭐ {r['score']:.2f}")
-                st.markdown(f"[🗺️ ดูแผนที่]({r['map']})")
-                st.divider()
-
-        # Pagination
-        if total_pages > 1:
-            p1, p2, p3 = st.columns([1, 2, 1])
-            with p1:
-                if st.button("⬅️ ก่อนหน้า") and page > 1:
-                    st.session_state.search_page -= 1
-                    st.rerun()
-            with p2:
-                st.write(f"หน้า {page} / {total_pages}")
-            with p3:
-                if st.button("ถัดไป ➡️") and page < total_pages:
-                    st.session_state.search_page += 1
-                    st.rerun()
-
-# ==================================================
-# ROUTER
-# ==================================================
-nav = st.session_state.nav
-
-if nav == "landing":
-    page_landing()
-elif nav == "auth":
-    page_auth()
-elif nav == "main":
-    page_main()
+if not st.session_state.has_started:
+    render_landing()
+elif not st.session_state.authenticated: 
+    render_auth()
+else: 
+    render_main()
