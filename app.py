@@ -349,6 +349,11 @@ def _ensure_shop_tables():
     except: pass
     try: conn.execute("ALTER TABLE shops ADD COLUMN open_hours TEXT")
     except: pass
+    try: conn.execute("ALTER TABLE shops ADD COLUMN google_map_link TEXT")
+    except: pass
+    try: conn.execute("ALTER TABLE shops ADD COLUMN created_at TEXT")
+    except: pass
+    
     try: conn.execute("ALTER TABLE shop_parts ADD COLUMN car_model TEXT")
     except: pass
     try: conn.execute("ALTER TABLE shop_parts ADD COLUMN brand TEXT")
