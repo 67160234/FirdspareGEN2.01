@@ -246,6 +246,88 @@ def get_user_favorites(user_id):
         return []
 
 # ---------------------------
+# COMMUNITY DB FUNCTIONS
+# ---------------------------
+def _ensure_community_tables():
+    conn = get_db_connection()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS community_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            image TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS community_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit(); conn.close()
+
+def get_community_posts():
+    try:
+        if USE_SUPABASE:
+            res = supabase.table("community_posts").select("*, users(username)").order("created_at", desc=True).execute()
+            return res.data
+        else:
+            _ensure_community_tables()
+            conn = get_db_connection()
+            rows = conn.execute("SELECT p.*, u.username FROM community_posts p JOIN users u ON p.user_id = u.id ORDER BY p.created_at DESC").fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        st.error(f"❌ Error loading posts: {e}"); return []
+
+def create_community_post(user_id, title, content, image_filename=None):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if USE_SUPABASE:
+            supabase.table("community_posts").insert({"user_id": user_id, "title": title, "content": content, "image": image_filename, "created_at": now}).execute()
+        else:
+            _ensure_community_tables()
+            conn = get_db_connection()
+            conn.execute("INSERT INTO community_posts (user_id, title, content, image, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, title, content, image_filename, now))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        st.error(f"❌ Error creating post: {e}"); return False
+
+def get_community_comments(post_id):
+    try:
+        if USE_SUPABASE:
+            res = supabase.table("community_comments").select("*, users(username)").eq("post_id", post_id).order("created_at", desc=False).execute()
+            return res.data
+        else:
+            _ensure_community_tables()
+            conn = get_db_connection()
+            rows = conn.execute("SELECT c.*, u.username FROM community_comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC", (post_id,)).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        return []
+
+def create_community_comment(post_id, user_id, content):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if USE_SUPABASE:
+            supabase.table("community_comments").insert({"post_id": post_id, "user_id": user_id, "content": content, "created_at": now}).execute()
+        else:
+            _ensure_community_tables()
+            conn = get_db_connection()
+            conn.execute("INSERT INTO community_comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)", (post_id, user_id, content, now))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        st.error(f"❌ Error creating comment: {e}"); return False
+
+# ---------------------------
 # UI CUSTOMIZATION (SIDEBAR)
 # ---------------------------
 with st.sidebar:
@@ -553,7 +635,7 @@ def render_main():
         return results
 
     st.title("🔧 FindSpares AI Search")
-    tab_search, tab_fav = st.tabs(["🔍 ค้นหาอะไหล่", "⭐ รายการโปรด"])
+    tab_search, tab_fav, tab_community = st.tabs(["🔍 ค้นหาอะไหล่", "⭐ รายการโปรด", "💬 ชุมชนคนรักรถ"])
     
     @st.dialog("📸 FindSpares Scanner", width="large")
     def camera_modal():
@@ -603,6 +685,63 @@ def render_main():
             for item in fav_items:
                 res.append({"id": item["id"], "part_name": item["part_name"], "image": item["image"], "shop_name": item["shop_name"], "distance": 0, "score": 1.0, "map": item["google_map_link"]})
             render_grid(res, is_fav_view=True)
+
+    with tab_community:
+        st.header("💬 ชุมชนคนรักรถ (Community)")
+        
+        # New Post Section
+        with st.expander("➕ ตั้งกระทู้ใหม่"):
+            with st.form("new_post"):
+                p_title = st.text_input("หัวข้อกระทู้", placeholder="เช่น อะไหล่ชิ้นนี้คืออะไรครับ?")
+                p_content = st.text_area("เนื้อหา", placeholder="สอบถาม หรือ แบ่งปันข้อมูล...")
+                p_img = st.file_uploader("แนบรูปภาพ (ถ้ามี)", type=["jpg", "png", "jpeg"])
+                if st.form_submit_button("📤 โพสต์", type="primary"):
+                    if p_title.strip() and p_content.strip():
+                        img_filename = None
+                        if p_img:
+                            os.makedirs("shop_parts", exist_ok=True)
+                            img_filename = f"post_{datetime.utcnow().timestamp()}.jpg"
+                            img_path = os.path.join("shop_parts", img_filename)
+                            with open(img_path, "wb") as f: f.write(p_img.getbuffer())
+                        if create_community_post(st.session_state.user_id, p_title, p_content, img_filename):
+                            st.success("✅ โพสต์สำเร็จ!")
+                            st.rerun()
+                    else:
+                        st.warning("⚠️ กรุณากรอกหัวข้อและเนื้อหา")
+
+        st.divider()
+        st.subheader("📰 กระทู้ล่าสุด")
+        posts = get_community_posts()
+        if not posts:
+            st.info("ยังไม่มีกระทู้ในขณะนี้ เป็นคนแรกที่ตั้งกระทู้สิ!")
+        else:
+            for post in posts:
+                with st.container(border=True):
+                    pc1, pc2 = st.columns([1, 5])
+                    with pc1:
+                        st.markdown(f"**👤 {post['username']}**")
+                        st.caption(f"🕒 {post['created_at']}")
+                    with pc2:
+                        st.markdown(f"### {post['title']}")
+                        st.write(post['content'])
+                        if post.get('image'):
+                            img_p = f"shop_parts/{post['image']}"
+                            if os.path.exists(img_p): st.image(img_p, width=300)
+                    
+                    with st.expander("💬 ดูความคิดเห็น / ตอบกลับ"):
+                        comments = get_community_comments(post["id"])
+                        if comments:
+                            for c in comments:
+                                st.markdown(f"**{c['username']}**: {c['content']} *(<small>{c['created_at']}</small>)*", unsafe_allow_html=True)
+                        else:
+                            st.caption("ยังไม่มีความคิดเห็น")
+                        
+                        # Add comment form
+                        c_text = st.text_input(f"แสดงความคิดเห็น", key=f"c_in_{post['id']}")
+                        if st.button("ส่งความคิดเห็น", key=f"c_btn_{post['id']}"):
+                            if c_text.strip():
+                                if create_community_comment(post["id"], st.session_state.user_id, c_text):
+                                    st.rerun()
 
 def render_grid(results, is_fav_view=False):
     per_page = 9; total_p = math.ceil(len(results)/per_page); page = st.session_state.get("page", 1)
