@@ -1,12 +1,12 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
-numpy==1.26.4
+numpy
 Pillow
-torch==2.2.1
-torchvision==0.17.1
+torch
+torchvision
 ftfy
 regex
 tqdm
 git+https://github.com/openai/CLIP.git
-faiss-cpu==1.7.4
-supabase==2.4.5
-streamlit>=1.34.0
+faiss-cpu
+pymysql
+streamlit
