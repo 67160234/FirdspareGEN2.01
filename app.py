@@ -328,6 +328,135 @@ def create_community_comment(post_id, user_id, content):
         st.error(f"❌ Error creating comment: {e}"); return False
 
 # ---------------------------
+# SHOP DB FUNCTIONS
+# ---------------------------
+def _ensure_shop_tables():
+    conn = get_db_connection()
+    conn.execute("""CREATE TABLE IF NOT EXISTS shops (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL UNIQUE,
+        shop_name TEXT NOT NULL, address TEXT NOT NULL, latitude REAL NOT NULL,
+        longitude REAL NOT NULL, open_hours TEXT, google_map_link TEXT, created_at TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS shop_parts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, shop_id INTEGER NOT NULL,
+        part_name TEXT NOT NULL, car_model TEXT, brand TEXT, condition TEXT DEFAULT 'ใหม่',
+        stock INTEGER DEFAULT 1, image TEXT, created_at TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS part_embeddings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, part_id INTEGER NOT NULL UNIQUE,
+        embedding TEXT NOT NULL)""")
+    conn.commit(); conn.close()
+
+def get_user_shop(user_id):
+    try:
+        if USE_SUPABASE:
+            res = supabase.table("shops").select("*").eq("owner_id", user_id).execute()
+            return res.data[0] if res.data else None
+        else:
+            _ensure_shop_tables()
+            conn = get_db_connection()
+            row = conn.execute("SELECT * FROM shops WHERE owner_id=?", (user_id,)).fetchone()
+            conn.close()
+            return dict(row) if row else None
+    except Exception as e:
+        st.error(f"❌ {e}"); return None
+
+def create_shop(owner_id, shop_name, address, lat, lng, open_hours):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    map_link = f"https://www.google.com/maps?q={lat},{lng}"
+    try:
+        if USE_SUPABASE:
+            supabase.table("shops").insert({"owner_id": owner_id, "shop_name": shop_name, "address": address,
+                "latitude": lat, "longitude": lng, "open_hours": open_hours, "google_map_link": map_link, "created_at": now}).execute()
+        else:
+            _ensure_shop_tables()
+            conn = get_db_connection()
+            conn.execute("INSERT INTO shops (owner_id,shop_name,address,latitude,longitude,open_hours,google_map_link,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (owner_id, shop_name, address, lat, lng, open_hours, map_link, now))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        st.error(f"❌ สร้างร้านไม่สำเร็จ: {e}"); return False
+
+def update_shop(owner_id, shop_name, address, lat, lng, open_hours):
+    map_link = f"https://www.google.com/maps?q={lat},{lng}"
+    try:
+        if USE_SUPABASE:
+            supabase.table("shops").update({"shop_name": shop_name, "address": address, "latitude": lat,
+                "longitude": lng, "open_hours": open_hours, "google_map_link": map_link}).eq("owner_id", owner_id).execute()
+        else:
+            conn = get_db_connection()
+            conn.execute("UPDATE shops SET shop_name=?,address=?,latitude=?,longitude=?,open_hours=?,google_map_link=? WHERE owner_id=?",
+                (shop_name, address, lat, lng, open_hours, map_link, owner_id))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        st.error(f"❌ {e}"); return False
+
+def get_shop_products(shop_id):
+    try:
+        if USE_SUPABASE:
+            res = supabase.table("shop_parts").select("*").eq("shop_id", shop_id).execute()
+            return res.data
+        else:
+            _ensure_shop_tables()
+            conn = get_db_connection()
+            rows = conn.execute("SELECT * FROM shop_parts WHERE shop_id=? ORDER BY created_at DESC", (shop_id,)).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+    except: return []
+
+def add_shop_product(shop_id, part_name, car_model, brand, condition, stock, image_filename, model, preprocess, device):
+    """Add product and generate CLIP text embedding automatically."""
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if USE_SUPABASE:
+            res = supabase.table("shop_parts").insert({"shop_id": shop_id, "part_name": part_name, "car_model": car_model,
+                "brand": brand, "condition": condition, "stock": stock, "image": image_filename, "created_at": now}).execute()
+            part_id = res.data[0]["id"]
+        else:
+            _ensure_shop_tables()
+            conn = get_db_connection()
+            cur = conn.execute("INSERT INTO shop_parts (shop_id,part_name,car_model,brand,condition,stock,image,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (shop_id, part_name, car_model, brand, condition, stock, image_filename, now))
+            part_id = cur.lastrowid
+            conn.commit(); conn.close()
+
+        # Auto-generate CLIP embedding from part name
+        text_query = f"{part_name} {car_model or ''} {brand or ''}".strip()
+        tokens = clip.tokenize([text_query], truncate=True).to(device)
+        with torch.no_grad():
+            vec = model.encode_text(tokens)
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+        vec_list = vec.cpu().numpy().astype("float32")[0].tolist()
+        emb_json = json.dumps(vec_list)
+
+        if USE_SUPABASE:
+            supabase.table("part_embeddings").insert({"part_id": part_id, "embedding": vec_list}).execute()
+        else:
+            conn = get_db_connection()
+            conn.execute("INSERT OR REPLACE INTO part_embeddings (part_id, embedding) VALUES (?,?)", (part_id, emb_json))
+            conn.commit(); conn.close()
+
+        st.cache_resource.clear()  # Clear cache so new item appears in search
+        return True
+    except Exception as e:
+        st.error(f"❌ เพิ่มสินค้าไม่สำเร็จ: {e}"); return False
+
+def delete_shop_product(part_id):
+    try:
+        if USE_SUPABASE:
+            supabase.table("part_embeddings").delete().eq("part_id", part_id).execute()
+            supabase.table("shop_parts").delete().eq("id", part_id).execute()
+        else:
+            conn = get_db_connection()
+            conn.execute("DELETE FROM part_embeddings WHERE part_id=?", (part_id,))
+            conn.execute("DELETE FROM shop_parts WHERE id=?", (part_id,))
+            conn.commit(); conn.close()
+        st.cache_resource.clear()
+        return True
+    except Exception as e:
+        st.error(f"❌ {e}"); return False
+
+# ---------------------------
 # UI CUSTOMIZATION (SIDEBAR)
 # ---------------------------
 with st.sidebar:
@@ -635,7 +764,7 @@ def render_main():
         return results
 
     st.title("🔧 FindSpares AI Search")
-    tab_search, tab_fav, tab_community = st.tabs(["🔍 ค้นหาอะไหล่", "⭐ รายการโปรด", "💬 ชุมชนคนรักรถ"])
+    tab_search, tab_fav, tab_community, tab_shop = st.tabs(["🔍 ค้นหาอะไหล่", "⭐ รายการโปรด", "💬 ชุมชนคนรักรถ", "🏪 ร้านค้าของฉัน"])
     
     @st.dialog("📸 FindSpares Scanner", width="large")
     def camera_modal():
@@ -742,6 +871,78 @@ def render_main():
                             if c_text.strip():
                                 if create_community_comment(post["id"], st.session_state.user_id, c_text):
                                     st.rerun()
+
+    with tab_shop:
+        st.header("🏪 ร้านค้าของฉัน")
+        my_shop = get_user_shop(st.session_state.user_id)
+
+        # ── Create / Edit Shop ──
+        with st.expander("⚙️ ข้อมูลร้านค้า", expanded=(my_shop is None)):
+            if my_shop is None:
+                st.info("📍 กรุณาสร้างร้านค้าของคุณก่อนเพิ่มสินค้า")
+            with st.form("shop_form"):
+                s_name = st.text_input("ชื่อร้าน*", value=my_shop["shop_name"] if my_shop else "")
+                s_addr = st.text_area("ที่อยู่ร้าน*", value=my_shop["address"] if my_shop else "")
+                sc1, sc2 = st.columns(2)
+                with sc1: s_lat = st.number_input("ละติจูด (Latitude)*", value=float(my_shop["latitude"]) if my_shop else 13.7563, format="%.6f", help="ดูใน Google Maps > คลิกสังเขตร้าน > คัดลอก Lat,Lng")
+                with sc2: s_lng = st.number_input("ลองจิจูด (Longitude)*", value=float(my_shop["longitude"]) if my_shop else 100.5018, format="%.6f")
+                s_hours = st.text_input("เวลาเปิด-ปิด", value=my_shop["open_hours"] if my_shop else "", placeholder="เช่น จ-ส 8:00-18:00")
+                submit_label = "✅ บันทึกการเปลี่ยนแปลง" if my_shop else "🏪 สร้างร้านค้า"
+                if st.form_submit_button(submit_label, use_container_width=True, type="primary"):
+                    if not s_name.strip() or not s_addr.strip():
+                        st.warning("⚠️ กรุณากรอกชื่อร้านและที่อยู่")
+                    else:
+                        ok = update_shop(st.session_state.user_id, s_name, s_addr, s_lat, s_lng, s_hours) if my_shop else create_shop(st.session_state.user_id, s_name, s_addr, s_lat, s_lng, s_hours)
+                        if ok: st.success("✅ สำเร็จ!"); st.rerun()
+
+        # ── Products List ──
+        if my_shop:
+            st.subheader(f"🏪 {my_shop['shop_name']}")
+            st.caption(f"📍 {my_shop['address']} | 🕒 {my_shop.get('open_hours','N/A')}")
+            st.divider()
+
+            # Add Product Form
+            with st.expander("➕ เพิ่มสินค้าใหม่"):
+                with st.form("add_product"):
+                    p1, p2 = st.columns(2)
+                    with p1:
+                        pn = st.text_input("ชื่อสินค้า*", placeholder="เช่น Brake Pad")
+                        pb = st.text_input("ยี่ห้อรถ (ถ้ามี)", placeholder="เช่น Toyota, Honda")
+                    with p2:
+                        pm = st.text_input("รุ่นรถ (ถ้ามี)", placeholder="เช่น Camry 2020")
+                        ps = st.number_input("จำนวนสต็อก*", min_value=1, value=1)
+                    pc = st.selectbox("สภาพสินค้า", ["ใหม่", "มือสอง", "OEM", "เกรด A"])
+                    pi = st.file_uploader("รูปสินค้า*", type=["jpg","png","jpeg"])
+                    if st.form_submit_button("➕ เพิ่มสินค้า", type="primary"):
+                        if not pn.strip() or not pi:
+                            st.warning("⚠️ กรุณากรอกชื่อสินค้าและแนบรูป")
+                        else:
+                            os.makedirs("shop_parts", exist_ok=True)
+                            img_fn = f"prod_{my_shop['id']}_{datetime.utcnow().timestamp()}.jpg"
+                            with open(os.path.join("shop_parts", img_fn), "wb") as f: f.write(pi.getbuffer())
+                            with st.spinner("🤖 กำลังสร้าง AI Embedding..."):
+                                ok = add_shop_product(my_shop["id"], pn, pm, pb, pc, ps, img_fn, model, preprocess, device)
+                            if ok: st.success("✅ เพิ่มสินค้าและอัปเดต AI Search สำเร็จ!"); st.rerun()
+
+            # Products Grid
+            products = get_shop_products(my_shop["id"])
+            st.subheader(f"📦 สินค้าทั้งหมด ({len(products)} รายการ)")
+            if not products:
+                st.info("ยังไม่มีสินค้า กดปุ่มเพิ่มสินค้าด้านบนได้เลย!")
+            else:
+                gcols = st.columns(3)
+                for gi, prod in enumerate(products):
+                    with gcols[gi % 3]:
+                        with st.container(border=True):
+                            img_p = f"shop_parts/{prod['image']}" if prod.get("image") else None
+                            if img_p and os.path.exists(img_p): st.image(img_p, use_container_width=True)
+                            else: st.image("https://via.placeholder.com/300x200?text=No+Image", use_container_width=True)
+                            st.markdown(f"**{prod['part_name']}**")
+                            if prod.get("car_model"): st.caption(f"🚗 {prod['car_model']}")
+                            if prod.get("brand"): st.caption(f"🏷️ {prod['brand']}")
+                            st.caption(f"✅ {prod['condition']} | 📦 คงเหลือ {prod['stock']} ชิ้น")
+                            if st.button("🗑️ ลบสินค้า", key=f"del_{prod['id']}", use_container_width=True):
+                                if delete_shop_product(prod["id"]): st.rerun()
 
 def render_grid(results, is_fav_view=False):
     per_page = 9; total_p = math.ceil(len(results)/per_page); page = st.session_state.get("page", 1)
